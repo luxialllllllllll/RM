@@ -1,6 +1,8 @@
 #pip install opencv-python
 # 下载 https://iriun.com/?utm_source=chatgpt.com
 
+# 查看摄像头是否连接到电脑，python camara.py
+
 import cv2
 
 # 0 是摄像头编号，可尝试 1、2、3

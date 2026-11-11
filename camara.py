@@ -8,7 +8,7 @@ import cv2
 # 0 是摄像头编号，可尝试 1、2、3
 cap = cv2.VideoCapture(1, cv2.CAP_DSHOW)
 if not cap.isOpened():
-    raise RuntimeError("无法打开摄像头")
+    raise RuntimeError("Não foi possível abrir a câmera. ")
 
 while True:
     ret, frame = cap.read()

@@ -15,7 +15,7 @@ output.mkdir(exist_ok=True)
 cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
 
 if not cap.isOpened():
-    raise RuntimeError("无法连接手机摄像头")
+    raise RuntimeError("Não foi possível abrir a câmera. Verifique se a câmera está conectada e se o driver está instalado corretamente.")
 
 with ClientAsync() as client:
 

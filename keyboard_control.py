@@ -26,7 +26,7 @@ async def main():
 
         try:
             await move(0, 0)
-            print("连接成功！使用方向键控制机器人")
+            print("conectado ao Thymio! Use as setas do teclado para controlar o robô. Pressione ESPAÇO para parar.")
 
             while running:
                 for event in pygame.event.get():

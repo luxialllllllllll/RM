@@ -1,492 +1,396 @@
-
-import cv2
 import pygame
-import numpy as np
 
+from time import monotonic
 from tdmclient import ClientAsync
 
-
-# ==========================
-# 基本配置
-# ==========================
-
-CAMERA_ID = 0
-
-# 前进速度
-SPEED = 80
-
-# 原地转弯速度
-TURN_SPEED = 70
-
-# 障碍物检测阈值
-OBSTACLE_THRESHOLD = 3000
-
-# 转弯持续时间（秒）
-TURN_TIME = 0.15
-
-# 每次控制循环间隔
-LOOP_INTERVAL = 0.03
-
-WINDOW_WIDTH = 960
-WINDOW_HEIGHT = 540
+from robot import Robot
+from camara import Camera
+from fog_map import FogMap
+from ui import GameUI
 
 
 # ==========================
-# 主程序
+# 参数配置
+# ==========================
+
+# 停车后等待机器人稳定的时间
+STOP_TIME = 0.3
+
+# 二维码扫描超时时间
+SCAN_TIMEOUT = 3.0
+
+# 两次二维码识别之间的时间
+SCAN_INTERVAL = 0.2
+
+# 机器人转弯时间，需要实际测试
+TURN_TIME = 0.8
+
+# 转弯后等待稳定的时间
+TURN_STOP_TIME = 0.2
+
+# 主循环间隔
+LOOP_INTERVAL = 0.05
+
+# 最大连续转弯尝试次数
+MAX_TURN_ATTEMPTS = 4
+
+
+# ==========================
+# 游戏主程序
 # ==========================
 
 async def main():
 
-    # 连接 Thymio 机器人
-    with ClientAsync() as client:
+     with ClientAsync() as client:
 
-        print("A tentar conectar ao Thymio...")
+        print("A procurar o Thymio...")
 
+        # 获取机器人节点
         node = await client.wait_for_node()
+
+        # 等待机器人进入可控制状态
+        print("A aguardar pelo Thymio...")
+
+        start_time = monotonic()
+
+        while node.status != client.NODE_STATUS_AVAILABLE:
+
+            # 超过10秒则停止等待
+            if monotonic() - start_time >= 10:
+
+                raise RuntimeError(
+                    f"Thymio indisponível. Estado: {node.status}"
+                )
+
+            await client.sleep(0.1)
+
+        # 获取机器人控制权限
         await node.lock()
 
-        print("Thymio conectado!")
+        print("Thymio conectado com sucesso.")
 
-        cap = None
-        pygame_started = False
+        robot = Robot(node)
 
-        # 自动驾驶状态
-        automatic = True
-
-        # 当前运动状态
-        state = "FORWARD"
-
-        # 转弯方向
-        turn_direction = None
-
-        # 上一次电机指令
-        last_command = None
-
-        # ==========================
-        # 设置左右电机速度
-        # ==========================
-
-        async def move(left, right):
-
-            nonlocal last_command
-
-            command = (left, right)
-
-            # 避免重复发送相同的指令
-            if command != last_command:
-
-                await node.set_variables({
-                    "motor.left.target": [left],
-                    "motor.right.target": [right]
-                })
-
-                last_command = command
+        camera = None
+        ui = None
 
         try:
 
-            # ==========================
-            # 1. 初始化传感器
-            # ==========================
+            # 初始化机器人
+            await robot.stop()
+            await robot.init_sensors()
 
-            print("A inicializar os sensores...")
+            # 初始化摄像头
+            camera = Camera()
 
-            await node.wait_for_variables({
-                "prox.horizontal"
-            })
+            # 初始化迷雾地图
+            fog_map = FogMap()
 
-            # ==========================
-            # 2. 初始化摄像头
-            # ==========================
+            # 初始化游戏界面
+            ui = GameUI()
 
-            cap = cv2.VideoCapture(
-                CAMERA_ID,
-                cv2.CAP_DSHOW
-            )
+            # 游戏状态
+            state = "MOVING"
 
-            if not cap.isOpened():
-                raise RuntimeError(
-                    "Não foi possível abrir a câmara."
-                )
+            # 状态开始时间
+            state_time = monotonic()
 
-            cap.set(
-                cv2.CAP_PROP_FRAME_WIDTH,
-                640
-            )
+            # 最近一次扫码时间
+            last_scan_time = 0
 
-            cap.set(
-                cv2.CAP_PROP_FRAME_HEIGHT,
-                480
-            )
+            # 钥匙状态
+            has_key = False
 
-            cap.set(
-                cv2.CAP_PROP_BUFFERSIZE,
-                1
-            )
+            # 连续转弯次数
+            turn_attempts = 0
 
-            # ==========================
-            # 3. 初始化游戏窗口
-            # ==========================
+            # 当前转弯方向
+            direction = None
 
-            pygame.init()
-            pygame_started = True
-
-            screen = pygame.display.set_mode(
-                (WINDOW_WIDTH, WINDOW_HEIGHT)
-            )
-
-            pygame.display.set_caption(
-                "Thymio Escape Room - Automatic"
-            )
-
-            clock = pygame.time.Clock()
-
-            font = pygame.font.SysFont(
-                "arial",
-                22
-            )
-
-            warning_font = pygame.font.SysFont(
-                "arial",
-                30,
-                bold=True
-            )
-
+            # 是否继续运行
             running = True
 
-            await move(0, 0)
+            # 状态对应的葡萄牙语显示文字
+            state_labels = {
+                "MOVING": "A explorar",
+                "STOPPING": "A parar",
+                "SCANNING": "A ler código QR",
+                "TURNING": "A virar",
+                "CHECKING": "A verificar",
+                "PUZZLE": "Puzzle encontrado",
+                "FINISHED": "Missão concluída",
+                "BLOCKED": "Caminho bloqueado",
+                "ERROR": "Erro"
+            }
 
-            print("Modo automático ativado.")
-            print("SPACE: pausar ou continuar")
-            print("ESC: sair do jogo")
+            print("Exploração automática iniciada.")
 
             # ==========================
-            # 4. 游戏主循环
+            # 开始游戏循环
             # ==========================
 
             while running:
 
-                # ==========================
-                # 4.1 处理键盘事件
-                # ==========================
+                # 处理窗口关闭和 ESC
+                if not ui.handle_events():
 
-                for event in pygame.event.get():
-
-                    if event.type == pygame.QUIT:
-                        running = False
-
-                    elif event.type == pygame.KEYDOWN:
-
-                        if event.key == pygame.K_ESCAPE:
-                            running = False
-
-                        elif event.key == pygame.K_SPACE:
-
-                            automatic = not automatic
-
-                            if not automatic:
-
-                                await move(0, 0)
-                                state = "PAUSED"
-
-                                print("Robô em pausa.")
-
-                            else:
-
-                                state = "FORWARD"
-
-                                print(
-                                    "Modo automático retomado."
-                                )
-
-                if not running:
+                    await robot.stop()
                     break
 
-                # ==========================
-                # 4.2 读取红外传感器
-                # ==========================
+                # 持续获取摄像头画面
+                frame = camera.read()
 
-                await node.wait_for_variables({
-                    "prox.horizontal"
-                })
+                now = monotonic()
 
-                prox = list(
-                    node.v.prox.horizontal[:5]
-                )
+                # 摄像头断开时停止机器人
+                if frame is None:
 
-                # 左侧两个传感器
-                left_proximity = max(
-                    prox[0],
-                    prox[1]
-                )
+                    await robot.stop()
 
-                # 中间传感器
-                center_proximity = prox[2]
+                    state = "ERROR"
 
-                # 右侧两个传感器
-                right_proximity = max(
-                    prox[3],
-                    prox[4]
-                )
-
-                # 前方整体障碍物强度
-                max_proximity = max(prox)
-
-                # 判断前方是否有障碍物
-                obstacle_detected = (
-                    max_proximity > OBSTACLE_THRESHOLD
-                )
+                    print("Erro: ligação à câmara perdida.")
 
                 # ==========================
-                # 4.3 自动导航
+                # 状态一：自动前进
                 # ==========================
 
-                if automatic:
+                if state == "MOVING":
 
-                    if obstacle_detected:
+                    if robot.has_obstacle():
 
-                        # 发现障碍物，立即停车
-                        if state == "FORWARD":
+                        await robot.stop()
 
-                            await move(0, 0)
+                        state = "STOPPING"
+                        state_time = monotonic()
 
-                            print(
-                                "Obstáculo detetado!"
-                            )
+                        print("Obstáculo detetado.")
 
-                            # 比较左右两侧的障碍物强度
-                            if left_proximity < right_proximity:
+                    else:
 
-                                turn_direction = "LEFT"
+                        await robot.forward()
+
+                        turn_attempts = 0
+
+                # ==========================
+                # 状态二：停车并等待稳定
+                # ==========================
+
+                elif state == "STOPPING":
+
+                    await robot.stop()
+
+                    if now - state_time >= STOP_TIME:
+
+                        state = "SCANNING"
+
+                        state_time = monotonic()
+
+                        last_scan_time = 0
+
+                        print("A procurar código QR...")
+
+                # ==========================
+                # 状态三：扫描二维码
+                # ==========================
+
+                elif state == "SCANNING":
+
+                    await robot.stop()
+
+                    qr_data = None
+
+                    # 控制扫码频率
+                    if now - last_scan_time >= SCAN_INTERVAL:
+
+                        qr_data = camera.scan_qr(frame)
+
+                        last_scan_time = monotonic()
+
+                    # 成功识别二维码
+                    if qr_data is not None:
+
+                        # 记录二维码
+                        fog_map.process_qr(qr_data)
+
+                        # 检测谜题区域
+                        if qr_data == "QR13" and not has_key:
+
+                            print("Puzzle encontrado.")
+
+                            state = "PUZZLE"
+
+                        # 检测出口区域
+                        elif qr_data == "QR15" and has_key:
+
+                            await robot.stop()
+
+                            state = "FINISHED"
+
+                            print("Missão concluída!")
+
+                        else:
+
+                            if qr_data == "QR15":
 
                                 print(
-                                    "A virar para a esquerda."
-                                )
-
-                            else:
-
-                                turn_direction = "RIGHT"
-
-                                print(
-                                    "A virar para a direita."
+                                    "É necessário encontrar a chave."
                                 )
 
                             state = "TURNING"
 
-                    # ==========================
-                    # 转弯状态
-                    # ==========================
+                            direction = robot.choose_direction()
 
-                    if state == "TURNING":
+                            state_time = monotonic()
 
-                        if turn_direction == "LEFT":
+                    # 扫描超时
+                    elif now - state_time >= SCAN_TIMEOUT:
 
-                            await move(
-                                -TURN_SPEED,
-                                TURN_SPEED
-                            )
+                        print("Nenhum código QR encontrado.")
+
+                        state = "TURNING"
+
+                        direction = robot.choose_direction()
+
+                        state_time = monotonic()
+
+                # ==========================
+                # 状态四：机器人转弯
+                # ==========================
+
+                elif state == "TURNING":
+
+                    if now - state_time < TURN_TIME:
+
+                        if direction == "LEFT":
+
+                            await robot.turn_left()
 
                         else:
 
-                            await move(
-                                TURN_SPEED,
-                                -TURN_SPEED
-                            )
+                            await robot.turn_right()
 
-                        # 短时间转弯后重新检测
-                        await client.sleep(TURN_TIME)
+                    else:
 
-                        await move(0, 0)
+                        await robot.stop()
+
+                        turn_attempts += 1
 
                         state = "CHECKING"
 
-                    # ==========================
-                    # 重新检查前方
-                    # ==========================
-
-                    elif state == "CHECKING":
-
-                        # 下次循环重新获取传感器数据
-                        state = "FORWARD"
-
-                    # ==========================
-                    # 前方安全，继续前进
-                    # ==========================
-
-                    elif state == "FORWARD":
-
-                        if not obstacle_detected:
-
-                            await move(
-                                SPEED,
-                                SPEED
-                            )
-
-                else:
-
-                    await move(0, 0)
+                        state_time = monotonic()
 
                 # ==========================
-                # 4.4 读取摄像头画面
+                # 状态五：检查转弯后的方向
                 # ==========================
 
-                ret, frame = cap.read()
+                elif state == "CHECKING":
 
-                if ret:
+                    await robot.stop()
 
-                    frame = cv2.resize(
-                        frame,
-                        (
-                            WINDOW_WIDTH,
-                            WINDOW_HEIGHT
-                        )
-                    )
+                    if now - state_time >= TURN_STOP_TIME:
 
-                    frame = cv2.cvtColor(
-                        frame,
-                        cv2.COLOR_BGR2RGB
-                    )
+                        if robot.has_obstacle():
 
-                    frame = np.transpose(
-                        frame,
-                        (1, 0, 2)
-                    )
+                            # 防止机器人无限原地转弯
+                            if turn_attempts >= MAX_TURN_ATTEMPTS:
 
-                    surface = pygame.surfarray.make_surface(
-                        frame
-                    )
+                                state = "BLOCKED"
 
-                    screen.blit(
-                        surface,
-                        (0, 0)
-                    )
+                                print("Caminho bloqueado.")
 
-                else:
+                            else:
 
-                    screen.fill(
-                        (0, 0, 0)
-                    )
+                                # 继续向同一个方向转弯
+                                state = "TURNING"
 
-                    # 摄像头失败时停止机器人
-                    await move(0, 0)
-                    automatic = False
-                    state = "PAUSED"
+                                state_time = monotonic()
+
+                        else:
+
+                            state = "MOVING"
+
+                            state_time = monotonic()
+
+                            print("A continuar a exploração.")
 
                 # ==========================
-                # 4.5 显示状态信息
+                # 状态六：谜题区域
                 # ==========================
 
-                overlay = pygame.Surface(
-                    (WINDOW_WIDTH, 45),
-                    pygame.SRCALPHA
-                )
+                elif state == "PUZZLE":
 
-                overlay.fill(
-                    (0, 0, 0, 170)
-                )
+                    await robot.stop()
 
-                screen.blit(
-                    overlay,
-                    (0, 0)
-                )
-
-                info = font.render(
-                    "SPACE: Pause/Resume | ESC: Quit",
-                    True,
-                    (255, 255, 255)
-                )
-
-                screen.blit(
-                    info,
-                    (15, 10)
-                )
-
-                # 显示当前运动状态
-                status_text = font.render(
-                    f"Estado: {state}",
-                    True,
-                    (255, 255, 255)
-                )
-
-                screen.blit(
-                    status_text,
-                    (15, 55)
-                )
-
-                # 显示左右传感器数值
-                sensor_text = font.render(
-                    (
-                        f"Left: {left_proximity} | "
-                        f"Center: {center_proximity} | "
-                        f"Right: {right_proximity}"
-                    ),
-                    True,
-                    (255, 255, 255)
-                )
-
-                screen.blit(
-                    sensor_text,
-                    (15, WINDOW_HEIGHT - 35)
-                )
+                    # 后续添加推动箱子和获取钥匙逻辑
 
                 # ==========================
-                # 4.6 显示障碍物警告
+                # 状态七：游戏结束
                 # ==========================
 
-                if obstacle_detected:
+                elif state == "FINISHED":
 
-                    warning = warning_font.render(
-                        "OBSTACLE DETECTED",
-                        True,
-                        (255, 70, 70)
-                    )
-
-                    warning_rect = warning.get_rect(
-                        center=(
-                            WINDOW_WIDTH // 2,
-                            130
-                        )
-                    )
-
-                    screen.blit(
-                        warning,
-                        warning_rect
-                    )
-
-                pygame.display.flip()
+                    await robot.stop()
 
                 # ==========================
-                # 4.7 维持通信
+                # 状态八：道路阻塞或异常
                 # ==========================
 
-                await client.sleep(
-                    LOOP_INTERVAL
+                elif state in ("BLOCKED", "ERROR"):
+
+                    await robot.stop()
+
+                # ==========================
+                # 更新游戏界面
+                # ==========================
+
+                ui.render(
+                    frame,
+                    fog_map,
+                    state=state_labels.get(state, state),
+                    has_key=has_key
                 )
 
-                clock.tick(30)
+                # 保持机器人异步通信
+                await client.sleep(LOOP_INTERVAL)
+
+        except Exception as error:
+
+            print(f"Erro durante a execução: {error}")
+
+            raise
 
         finally:
 
-            # ==========================
-            # 5. 释放资源
-            # ==========================
-
-            print("A parar o robô...")
-
+            # 无论正常退出还是发生异常
+            # 都尝试停止机器人并释放资源
             try:
 
-                await move(0, 0)
+                await robot.stop()
 
             finally:
 
-                if cap is not None:
-                    cap.release()
+                try:
 
-                if pygame_started:
-                    pygame.quit()
+                    await node.unlock()
 
-                await node.unlock()
+                finally:
+
+                    if camera is not None:
+
+                        camera.close()
+
+                    if ui is not None:
+
+                        ui.close()
 
             print("Programa terminado.")
 
 
-ClientAsync.aw(main())
+# ==========================
+# 启动程序
+# ==========================
+
+if __name__ == "__main__":
+
+    ClientAsync.aw(main())

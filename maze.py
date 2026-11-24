@@ -71,89 +71,33 @@ qr13=(22,1) #二维码13
 qr14=(16,3) #二维码14
 qr15=(30,3) #二维码15
 
-
-# ==========================
-# 初始化 Pygame
-# ==========================
-
-pygame.init()
+# 二维码物理位置
+QR_POSITIONS = {
+    "QR1": qr1,
+    "QR2": qr2,
+    "QR3": qr3,
+    "QR4": qr4,
+    "QR5": qr5,
+    "QR6": qr6,
+    "QR7": qr7,
+    "QR8": qr8,
+    "QR9": qr9,
+    "QR10": qr10,
+    "QR11": qr11,
+    "QR12": qr12,
+    "QR13": qr13,
+    "QR14": qr14,
+    "QR15": qr15
+}
 
 ROWS = len(MAZE)
 COLS = len(MAZE[0])
 
-screen = pygame.display.set_mode(
-    (COLS * CELL_SIZE, ROWS * CELL_SIZE)
-)
 
-pygame.display.set_caption("Thymio - Mapa 2D")
+# 判断指定位置是否可以通行
+def is_walkable(x, y):
 
-clock = pygame.time.Clock()
+    if 0 <= x < COLS and 0 <= y < ROWS:
+        return MAZE[y][x] == "1"
 
-# ==========================
-# 绘制地图
-# ==========================
-
-def draw_map():
-
-    screen.fill((15, 20, 30))
-
-    for y, row in enumerate(MAZE):
-        for x, cell in enumerate(row):
-
-            rect = pygame.Rect(
-                x * CELL_SIZE,
-                y * CELL_SIZE,
-                CELL_SIZE,
-                CELL_SIZE
-            )
-
-            if cell == "1":
-                color = (185, 190, 200)
-            else:
-                color = (15, 20, 30)
-
-            pygame.draw.rect(screen, color, rect)
-
-    # 绘制特殊位置
-    markers = [
-        (START, (50, 220, 100)),
-        (EXIT, (240, 80, 100)),
-        (BOX, (245, 175, 60)),
-        (PUZZLE, (160, 100, 240))
-    ]
-
-    for (x, y), color in markers:
-        pygame.draw.circle(
-            screen,
-            color,
-            (
-                x * CELL_SIZE + CELL_SIZE // 2,
-                y * CELL_SIZE + CELL_SIZE // 2
-            ),
-            8
-        )
-
-    pygame.display.flip()
-
-
-# ==========================
-# 主循环
-# ==========================
-
-running = True
-
-while running:
-
-    for event in pygame.event.get():
-
-        if event.type == pygame.QUIT:
-            running = False
-
-        elif event.type == pygame.KEYDOWN:
-            if event.key == pygame.K_ESCAPE:
-                running = False
-
-    draw_map()
-    clock.tick(30)
-
-pygame.quit()
+    return False
